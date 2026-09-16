@@ -22,23 +22,22 @@ compatible endpoint). Full chat history, tab/URL context, notes, meetings, custo
 | **Edge** | [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/jkmmbleapaognlonbnllpaoeibmfkjmp) |
 | **Local agents** (Claude Code, Codex, …) | `curl -fsSL https://dl.chatpanel.net/install.sh \| sh` — see [chatpanel.net/#install](https://chatpanel.net/#install) |
 
-## Where the source is
+## What we guarantee — and how you check it
 
-The parts that run on your machine with access to your data are **source-available**
-under the [PolyForm Shield 1.0.0](https://polyformproject.org/licenses/shield/1.0.0/)
-license, so you can read exactly what they do:
+The code is not public: the extension, the bridge, the gateway and the desktop app ship as
+ordinary, minified JavaScript. What is public is a set of guarantees you can verify on
+your own machine, without trusting us:
 
-| Component | Repo | What it is |
-|---|---|---|
-| **Local bridge** | [chatpanel/chatpanel-bridge](https://github.com/chatpanel/chatpanel-bridge) | The localhost process that talks to your coding agents. Listens on `127.0.0.1` only; uses your existing logins; no telemetry. |
-| **Redaction engine** | [chatpanel/chatpanel-pii](https://github.com/chatpanel/chatpanel-pii) | Strips personal data before anything reaches a cloud model. Runs client-side. |
-| **Privacy gateway** | [chatpanel/chatpanel-gateway](https://github.com/chatpanel/chatpanel-gateway) | Optional localhost proxy for routing and redaction across clients. |
+| Guarantee | How to check it yourself |
+|---|---|
+| **The extension** talks only to the model endpoint you configured, your local bridge/gateway, and `api.chatpanel.net` for the licence check (never chat content). | DevTools on the side panel (right-click → Inspect → **Network**): every request it makes is listed. Any other host is a bug. |
+| **The gateway** contacts only the hosts it declares — your model upstreams, `dl.chatpanel.net`/`huggingface.co` for model weights, `api.chatpanel.net` for the licence, the npm registry for the update check. | `chatpanel-gateway --audit` prints every host it has actually reached since it started **and** every host your config allows, with the reason, what is sent, and the switch that turns it off. Same data on the extension's Gateway tab. |
+| **The bridge** listens on `127.0.0.1` only and sends nothing anywhere itself — it drives the coding agents you already have, with your own logins. | `lsof -i -P \| grep chatpanel` shows one loopback listener. Every outbound connection belongs to your agent, not the bridge. |
+| **Redaction runs on your machine** before anything reaches a cloud model. | The engine is the one readable piece, on purpose: [chatpanel/chatpanel-pii](https://github.com/chatpanel/chatpanel-pii) ([PolyForm Shield](https://polyformproject.org/licenses/shield/1.0.0/)), and it is vendored unchanged into the extension. |
+| **No telemetry.** | The [privacy policy](https://chatpanel.net/privacy.html) is what each store reviews the package against. |
 
-The extension itself ships as ordinary, minified JavaScript: unpack it from
-`chrome://extensions` and every network call it *can* make is there to see; the browser's
-DevTools shows every one it *does* make. What it promises is in the
-[privacy policy](https://chatpanel.net/privacy.html), which each store reviews against the
-package.
+If any of these is ever untrue on your machine, that is a security bug — see
+[SECURITY.md](SECURITY.md).
 
 ## Bugs, ideas, questions
 

@@ -12,8 +12,7 @@ notes if you wish.
 
 **In scope:** anything that lets a web page, another extension or a remote party reach
 the bridge or gateway, read conversations, notes or meetings, bypass redaction, escalate
-what an agent is allowed to do, or exfiltrate data. Both the bridge and the gateway are
-source-available (see the README) so you can read what you are reporting against.
+what an agent is allowed to do, or exfiltrate data.
 
 **Out of scope:** issues in the third-party models or agents you connect (report those
 upstream), and rate limits or availability of `api.chatpanel.net`.
