@@ -68,24 +68,27 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
-      # A package is public only if it is told to be. The first push creates it PRIVATE even
-      # from a public repo unless the org default says otherwise — which is the 403 this whole
-      # move exists to fix. Idempotent, and never fails the build: a green build that published
-      # a private image is still better than no image, and this prints what to click.
-      - name: Make the package public
+      # A package is created PRIVATE on its first push, even from a public repo, and a private
+      # image is the 403 this whole move exists to fix. GITHUB_TOKEN CANNOT change that:
+      # package visibility needs admin:packages, which the workflow token does not carry
+      # (measured 2026-09-22 — the first run built and pushed both images and they stayed
+      # private while the step reported success). So this no longer tries and pretends. It
+      # CHECKS, the way a user's machine does, with no credentials at all.
+      #
+      # Visibility is sticky: once public, later pushes keep it public. So this warns exactly
+      # once per image — on the run that first publishes it.
+      - name: Is it actually pullable?
         if: github.event_name != 'pull_request'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh api -X PATCH "orgs/chatpanel/packages/container/${{ matrix.image }}" \
-               -f visibility=public >/dev/null 2>&1; then
-            echo "ghcr.io/chatpanel/${{ matrix.image }} is public"
+          img="${{ matrix.image }}"
+          tok=$(curl -fsS "https://ghcr.io/token?scope=repository:chatpanel/$img:pull&service=ghcr.io" \
+                | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
+                 -H 'Accept: application/vnd.oci.image.index.v1+json' \
+                 "https://ghcr.io/v2/chatpanel/$img/manifests/latest")
+          if [ "$code" = "200" ]; then
+            echo "OK  anyone can: podman pull ghcr.io/chatpanel/$img:latest"
           else
-            echo "::warning::Could not set visibility (GITHUB_TOKEN may lack admin:packages)."
-            echo "::warning::Set it once by hand: https://github.com/orgs/chatpanel/packages/container/${{ matrix.image }}/settings"
+            echo "::warning title=$img is PRIVATE::Published, but an anonymous pull answers HTTP $code, so users cannot get it. Set it public ONCE (it stays public after): https://github.com/orgs/chatpanel/packages/container/$img/settings"
+            echo "$img is PRIVATE - see this run's warning for the one-time fix."
           fi
-
-      - name: Say how to pull it
-        if: github.event_name != 'pull_request'
-        run: echo "podman pull ghcr.io/chatpanel/${{ matrix.image }}:latest"
