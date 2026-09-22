@@ -1,0 +1,91 @@
+# Build and publish the container images in containers/ to ghcr.io/chatpanel/*.
+#
+# IT LIVES IN THIS REPO, AND THAT IS THE POINT. It used to live in the private hub, where it
+# never once succeeded:
+#   • the push was refused — `denied: permission_denied: The requested installation does not
+#     exist` — because that repo's GITHUB_TOKEN could not write packages in this namespace;
+#   • a package pushed from a PRIVATE repo inherits private visibility, so even a successful
+#     build would have left users with a 403 on `podman pull`;
+#   • and since 2026-09-21 every job on the org has been refused at start over the billing
+#     spending limit.
+# All three go away here: the token owns the namespace, the package inherits this repo's
+# PUBLIC visibility so anyone can pull it, and Actions on standard runners are free for public
+# repositories, so the spending limit does not reach these builds.
+#
+# Multi-arch on purpose: these images exist because the official ones are amd64-only or
+# CUDA-only (containers/README.md has the table). arm64 is built under QEMU and is slow —
+# vllm-cpu compiles torch and vLLM from source. That is the cost of the thing being useful.
+name: Capability images
+
+on:
+  push:
+    branches: [main]
+    paths: ['containers/**', '.github/workflows/capability-images.yml']
+  pull_request:
+    paths: ['containers/**', '.github/workflows/capability-images.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    # ubuntu-latest ON PURPOSE, and it must stay GitHub-hosted. The private repos' publish
+    # workflows moved to the self-hosted runner to get around the org's billing block
+    # (RELEASE_RUNNER) — do NOT do that here. This workflow builds pull requests, and this repo
+    # is public, so a self-hosted runner would execute a stranger's fork on that machine.
+    # It does not need the escape hatch anyway: Actions on standard runners are free for public
+    # repositories, so the spending limit never reaches this job.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false          # one image's upstream breaking must not hide the other two
+      matrix:
+        image: [reranker-cpu, opendecision-cpu, vllm-cpu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # A pull request from a fork gets a read-only token, so it BUILDS but must not push.
+      # Without this the contribution path in containers/README.md fails at the last step.
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: containers/${{ matrix.image }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/chatpanel/${{ matrix.image }}:latest
+            ghcr.io/chatpanel/${{ matrix.image }}:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      # A package is public only if it is told to be. The first push creates it PRIVATE even
+      # from a public repo unless the org default says otherwise — which is the 403 this whole
+      # move exists to fix. Idempotent, and never fails the build: a green build that published
+      # a private image is still better than no image, and this prints what to click.
+      - name: Make the package public
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api -X PATCH "orgs/chatpanel/packages/container/${{ matrix.image }}" \
+               -f visibility=public >/dev/null 2>&1; then
+            echo "ghcr.io/chatpanel/${{ matrix.image }} is public"
+          else
+            echo "::warning::Could not set visibility (GITHUB_TOKEN may lack admin:packages)."
+            echo "::warning::Set it once by hand: https://github.com/orgs/chatpanel/packages/container/${{ matrix.image }}/settings"
+          fi
+
+      - name: Say how to pull it
+        if: github.event_name != 'pull_request'
+        run: echo "podman pull ghcr.io/chatpanel/${{ matrix.image }}:latest"
