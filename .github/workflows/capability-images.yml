@@ -8,160 +8,48 @@
 #     build would have left users with a 403 on `podman pull`;
 #   • and since 2026-09-21 every job on the org has been refused at start over the billing
 #     spending limit.
-# All three go away here: the token owns the namespace, the package can be public so anyone
-# can pull it, and Actions on standard runners are free for public repositories, so the
-# spending limit does not reach these builds.
+# All three go away here: the token owns the namespace, the package can be public so anyone can
+# pull it, and Actions on standard runners are free for public repositories, so the spending
+# limit does not reach these builds.
 #
-# ONE ARCHITECTURE PER RUNNER, because the alternative does not finish. The first run built
-# both halves of every image on one amd64 runner with QEMU emulating arm64:
-# reranker-cpu took 10 minutes, opendecision-cpu 13 — and vllm-cpu, which compiles torch and
-# vLLM from source, was CANCELLED by GitHub at the 6 h job ceiling having never completed
-# (run 35768462522, 2026-09-22). Emulated compilation of that size is not slow, it is
-# unbuildable. GitHub now gives public repositories free arm64 Linux runners, so each
-# platform builds natively on its own machine and a merge job joins the two digests into one
-# manifest list — docker/build-push-action's documented multi-arch pattern. Both halves run
-# at native speed and in parallel, so the wall clock is the slower half, not the sum.
+# ONE CALL PER IMAGE, not one shared matrix. The images have wildly different build times —
+# reranker-cpu and opendecision-cpu take 2 minutes, vllm-cpu compiles torch and vLLM from
+# source and takes the best part of an hour. A shared matrix makes the merge job wait on
+# `needs: build`, which is the WHOLE matrix, so the two fast images sat built-but-untagged
+# behind the slow one and could not ship without it. Each call gets its own build→merge chain,
+# so a one-line fix to a fast image publishes in three minutes whatever vllm-cpu is doing.
+#
+# The per-image detail — native runners, push-by-digest, the manifest merge, the visibility
+# check — is in _image.yml, once, rather than three times here.
 name: Capability images
 
 on:
   push:
     branches: [main]
-    paths: ['containers/**', '.github/workflows/capability-images.yml']
+    paths: ['containers/**', '.github/workflows/capability-images.yml', '.github/workflows/_image.yml']
   pull_request:
-    paths: ['containers/**', '.github/workflows/capability-images.yml']
+    paths: ['containers/**', '.github/workflows/capability-images.yml', '.github/workflows/_image.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
-env:
-  REGISTRY_IMAGE_PREFIX: ghcr.io/chatpanel
-
 jobs:
-  build:
-    # BOTH runners are GitHub-hosted, and must stay that way. The private repos' publish
-    # workflows moved to the self-hosted runner to get around the billing block
-    # (RELEASE_RUNNER) — do NOT do that here. This workflow builds pull requests and this repo
-    # is public, so a self-hosted runner would execute a stranger's fork on that machine.
-    # It needs no escape hatch anyway: standard runners are free for public repositories.
-    runs-on: ${{ matrix.platform.runner }}
-    # Native now, so a build that runs long is a real problem rather than emulation overhead.
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false        # one image's upstream breaking must not hide the other two
-      matrix:
-        image: [reranker-cpu, opendecision-cpu, vllm-cpu]
-        platform:
-          - { name: linux/amd64, runner: ubuntu-latest,    arch: amd64 }
-          - { name: linux/arm64, runner: ubuntu-24.04-arm, arch: arm64 }
-    steps:
-      - uses: actions/checkout@v4
-      # No setup-qemu-action: emulating is the thing this layout exists to stop doing.
-      - uses: docker/setup-buildx-action@v3
+  reranker-cpu:
+    uses: ./.github/workflows/_image.yml
+    with:
+      image: reranker-cpu
+      push: ${{ github.event_name != 'pull_request' }}
 
-      - uses: docker/login-action@v3
-        if: github.event_name != 'pull_request'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+  opendecision-cpu:
+    uses: ./.github/workflows/_image.yml
+    with:
+      image: opendecision-cpu
+      push: ${{ github.event_name != 'pull_request' }}
 
-      # A PULL REQUEST BUILDS BUT DOES NOT PUSH. A fork's token is read-only, so pushing would
-      # fail at the last step and take the contribution path in containers/README.md with it.
-      - name: Build (pull request — no push)
-        if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: containers/${{ matrix.image }}
-          platforms: ${{ matrix.platform.name }}
-          push: false
-          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
-
-      # Push BY DIGEST, untagged: two runners cannot both write `:latest` without one erasing
-      # the other's architecture. Each pushes an anonymous single-arch image and the merge job
-      # below names the pair.
-      - name: Build and push by digest
-        id: build
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: containers/${{ matrix.image }}
-          platforms: ${{ matrix.platform.name }}
-          labels: org.opencontainers.image.revision=${{ github.sha }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE_PREFIX }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
-
-      - name: Hand the digest to the merge job
-        if: github.event_name != 'pull_request'
-        run: |
-          mkdir -p /tmp/digests
-          digest='${{ steps.build.outputs.digest }}'
-          [ -n "$digest" ] || { echo "::error::build produced no digest"; exit 1; }
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
-        with:
-          name: digest-${{ matrix.image }}-${{ matrix.platform.arch }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge:
-    # The two single-arch images become one multi-arch tag. Cheap — it writes a manifest, it
-    # does not rebuild anything.
-    needs: build
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [reranker-cpu, opendecision-cpu, vllm-cpu]
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digest-${{ matrix.image }}-*
-          merge-multiple: true
-
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create the manifest list
-        working-directory: /tmp/digests
-        run: |
-          img='${{ env.REGISTRY_IMAGE_PREFIX }}/${{ matrix.image }}'
-          ls -1 | sed 's/^/  digest: /'
-          docker buildx imagetools create \
-            -t "$img:latest" -t "$img:${{ github.sha }}" \
-            $(printf "$img@sha256:%s " *)
-          docker buildx imagetools inspect "$img:latest"
-
-      # A package is created PRIVATE on its first push, and a private image is the 403 this
-      # whole move exists to fix. NO token and no workflow can change that: GitHub's Packages
-      # REST API has no endpoint for visibility at all — get, delete, restore and versions,
-      # nothing that sets it — so a container package is made public only in the web UI.
-      # (An earlier step here PATCHed a URL that does not exist and reported success anyway;
-      # `admin:packages` is not a real scope either, it is read:/write:/delete:packages.)
-      # So this does not try and pretend. It CHECKS, the way a user's machine does, with no
-      # credentials at all. Visibility is sticky, so it warns once per image and then never.
-      - name: Is it actually pullable?
-        run: |
-          img='${{ matrix.image }}'
-          tok=$(curl -fsS "https://ghcr.io/token?scope=repository:chatpanel/$img:pull&service=ghcr.io" \
-                | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
-                 -H 'Accept: application/vnd.oci.image.index.v1+json' \
-                 "https://ghcr.io/v2/chatpanel/$img/manifests/latest")
-          if [ "$code" = "200" ]; then
-            echo "OK  anyone can: podman pull ghcr.io/chatpanel/$img:latest"
-          else
-            echo "::warning title=$img is PRIVATE::Published, but an anonymous pull answers HTTP $code, so users cannot get it. Set it public ONCE (it stays public after): https://github.com/orgs/chatpanel/packages/container/$img/settings"
-            echo "$img is PRIVATE - see this run's warning for the one-time fix."
-          fi
+  vllm-cpu:
+    uses: ./.github/workflows/_image.yml
+    with:
+      image: vllm-cpu
+      push: ${{ github.event_name != 'pull_request' }}

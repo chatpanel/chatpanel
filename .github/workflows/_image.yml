@@ -1,0 +1,148 @@
+# Build ONE image in containers/ for both architectures and publish it as one multi-arch tag.
+#
+# Reusable, and called once per image by capability-images.yml, because the images have wildly
+# different build times: reranker-cpu and opendecision-cpu take 2 minutes each, vllm-cpu
+# compiles torch and vLLM from source and takes the best part of an hour. In a single shared
+# matrix the merge job waits on `needs: build`, which means the WHOLE matrix — so the two fast
+# images sat finished-but-untagged behind the slow one, and a one-line change to a fast image
+# could not ship until vllm rebuilt. One call per image gives each its own build→merge chain.
+name: Build one capability image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: the directory under containers/ and the ghcr package name
+        required: true
+        type: string
+      push:
+        description: false on a pull request — a fork's token is read-only
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/chatpanel/${{ inputs.image }}
+
+jobs:
+  build:
+    # BOTH runners are GitHub-hosted and must stay that way. The private repos' publish
+    # workflows use a self-hosted runner (RELEASE_RUNNER) to get past the org's billing block —
+    # do NOT do that here. This builds pull requests and the repo is public, so a self-hosted
+    # runner would execute a stranger's fork on that machine. It needs no escape hatch: standard
+    # runners are free for public repositories.
+    #
+    # ONE ARCHITECTURE PER RUNNER, because emulating does not finish. Building both halves on
+    # one amd64 runner with QEMU took 10 and 13 minutes for the two small images and was KILLED
+    # at GitHub's 6 h ceiling for vllm-cpu (run 35768462522). Native, the same two take 2
+    # minutes each. GitHub gives public repositories free arm64 runners, so nothing is emulated.
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux/amd64, runner: ubuntu-latest,    arch: amd64 }
+          - { name: linux/arm64, runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3   # no setup-qemu: emulation is what this avoids
+
+      - uses: docker/login-action@v3
+        if: inputs.push
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (no push)
+        if: ${{ !inputs.push }}
+        uses: docker/build-push-action@v6
+        with:
+          context: containers/${{ inputs.image }}
+          platforms: ${{ matrix.platform.name }}
+          push: false
+          cache-from: type=gha,scope=${{ inputs.image }}-${{ matrix.platform.arch }}
+
+      # Pushed BY DIGEST and untagged: two runners cannot both write `:latest` without one
+      # erasing the other's architecture. The merge job below names the pair.
+      - name: Build and push by digest
+        id: build
+        if: inputs.push
+        uses: docker/build-push-action@v6
+        with:
+          context: containers/${{ inputs.image }}
+          platforms: ${{ matrix.platform.name }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ inputs.image }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image }}-${{ matrix.platform.arch }}
+
+      - name: Hand the digest to the merge job
+        if: inputs.push
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          [ -n "$digest" ] || { echo "::error::build produced no digest"; exit 1; }
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.push
+        with:
+          name: digest-${{ inputs.image }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    if: inputs.push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-${{ inputs.image }}-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          ls -1 | sed 's/^/  digest: /'
+          docker buildx imagetools create \
+            -t "${{ env.IMAGE }}:latest" -t "${{ env.IMAGE }}:${{ github.sha }}" \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+          docker buildx imagetools inspect "${{ env.IMAGE }}:latest"
+
+      # A package is created PRIVATE on its first push, and a private image is the 403 this
+      # whole move exists to fix. NO token and no workflow can change that: GitHub's Packages
+      # REST API has no endpoint for visibility — get, delete, restore, versions, and nothing
+      # that sets it — so a container package is made public only in the web UI. (An earlier
+      # step here PATCHed a URL that does not exist and reported success anyway; `admin:packages`
+      # is not a real scope either, it is read:/write:/delete:packages.) So this does not try
+      # and pretend — it CHECKS, the way a user's machine does, with no credentials at all.
+      # Visibility is sticky, so this warns once per image and then never again.
+      - name: Is it actually pullable?
+        run: |
+          img='${{ inputs.image }}'
+          tok=$(curl -fsS "https://ghcr.io/token?scope=repository:chatpanel/$img:pull&service=ghcr.io" \
+                | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
+                 -H 'Accept: application/vnd.oci.image.index.v1+json' \
+                 "https://ghcr.io/v2/chatpanel/$img/manifests/latest")
+          if [ "$code" = "200" ]; then
+            echo "OK  anyone can: podman pull ghcr.io/chatpanel/$img:latest"
+          else
+            echo "::warning title=$img is PRIVATE::Published, but an anonymous pull answers HTTP $code, so users cannot get it. Set it public ONCE (it stays public after): https://github.com/orgs/chatpanel/packages/container/$img/settings"
+            echo "$img is PRIVATE - see this run's warning for the one-time fix."
+          fi
