@@ -1,11 +1,12 @@
-# ChatPanel
+# Chap by ChatPanel
 
 [<img src="https://chatpanel.net/assets/chrome-web-store-badge.png" alt="Available in the Chrome Web Store" height="56">](https://chromewebstore.google.com/detail/icemacffhbgnfoofclgdbcdmnlkkklem)
 [<img src="https://chatpanel.net/assets/edge-badge.svg" alt="Get it from Microsoft Edge Add-ons" height="56">](https://microsoftedge.microsoft.com/addons/detail/jkmmbleapaognlonbnllpaoeibmfkjmp)
 [<img src="https://chatpanel.net/assets/firefox-badge.svg" alt="Get the add-on for Firefox" height="56">](https://addons.mozilla.org/en-US/firefox/addon/chatpanel-privacy-first-ai/)
 
-A **privacy-first AI side panel** for Firefox / Chrome / Edge / Brave / Arc — and a
-desktop app — that lets you chat with **multiple AI agents from any tab**: the coding
+**Chap** ("Hey Chap") is your AI agent for work, from **ChatPanel**: a **privacy-first AI side
+panel** for Firefox / Chrome / Edge / Brave / Arc — and a desktop app, a terminal client and
+phone apps — that lets you chat with **multiple AI agents from any tab**: the coding
 agents already on your machine (**Claude Code**, **Codex**, **Antigravity CLI**) *and*
 **any model or API you bring** (local Ollama / LM Studio, or a hosted OpenAI-/Anthropic-
 compatible endpoint). Full chat history, tab/URL context, notes, meetings, custom agents
