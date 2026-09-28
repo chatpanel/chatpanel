@@ -5,8 +5,8 @@
 [<img src="https://chatpanel.net/assets/firefox-badge.svg" alt="Get the add-on for Firefox" height="56">](https://addons.mozilla.org/en-US/firefox/addon/chatpanel-privacy-first-ai/)
 
 **Chap** ("Hey Chap") is your AI agent for work, from **ChatPanel**: a **privacy-first AI side
-panel** for Firefox / Chrome / Edge / Brave / Arc — and a desktop app, a terminal client and
-phone apps — that lets you chat with **multiple AI agents from any tab**: the coding
+panel** for Firefox / Chrome / Edge / Brave / Arc — and a desktop app and a terminal client —
+that lets you chat with **multiple AI agents from any tab**: the coding
 agents already on your machine (**Claude Code**, **Codex**, **Antigravity CLI**) *and*
 **any model or API you bring** (local Ollama / LM Studio, or a hosted OpenAI-/Anthropic-
 compatible endpoint). Full chat history, tab/URL context, notes, meetings, custom agents
